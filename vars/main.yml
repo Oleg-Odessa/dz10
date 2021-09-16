@@ -1,0 +1,1 @@
+ldap_json: "{{ lookup('template', 'ldap_json.j2') }}"

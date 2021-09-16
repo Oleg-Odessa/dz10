@@ -1,0 +1,141 @@
+---
+- name: Install Rancher, LDAP  and configure
+  hosts: canary
+  become: true
+
+  tasks:
+
+#1################################################################################
+  - name: "Get information about installed packeges"
+    package_facts:
+     manager: "auto"
+
+  - name: "Massage if non-compliance"
+    debug:
+     msg: "The target host does not meet the requirements to run this playbook"
+    when: >
+          ansible_system != "Linux"
+          or ansible_distribution != "CentOS"
+          or ansible_distribution_version < "8"
+          or  ansible_python_version < "3"
+          or 'docker-ce' not in ansible_facts.packages
+          or ansible_memory_mb.real.total < 3000
+
+  - name: "Stopping when the playbook does not meet the requirements"
+    meta: end_play
+    when: >
+          ansible_system != "Linux"
+          and ansible_distribution != "CentOS"
+          and ansible_distribution_version < "8"
+          and  ansible_python_version < "3"
+          and 'docker-ce' not in ansible_facts.packages
+          or ansible_memory_mb.real.total < 3000
+
+#2################################################################################
+  - name: "Pull and run Docker image with OpenLDAP"
+    docker_container:
+     name: OpenLDAP
+     image: bitnami/openldap:2.5
+     state: started
+     restart_policy: unless-stopped
+     env:
+      LDAP_ADMIN_USERNAME: admin
+      LDAP_ADMIN_PASSWORD: Pa55w.rd
+      LDAP_USERS: hillel
+      LDAP_PASSWORDS: hillel
+
+#3################################################################################
+  - name: "Pull and run Docker image with Rancher"
+    docker_container:
+     name: Rancher
+     image: rancher/rancher:v2.5.6
+     state: started
+     restart_policy: unless-stopped
+     privileged: true
+     ports:
+      - "80:80"
+      - "443:443"
+
+#3.1##############################################################################
+  - name: "Pause play until the Rancher is reachable"
+    uri:
+     validate_certs: false
+     url: "https://127.0.0.1/ping"
+     timeout: 30
+    register: _result
+    until: _result.status == 200
+    retries: 100
+    delay: 3
+
+#4################################################################################
+  - name: Get temporary admin token
+    uri:
+     method: POST
+     status_code: 201
+     body_format: json
+     body: {"username":"admin", "password":"admin"}
+     validate_certs: false
+     url: "https://127.0.0.1/v3-public/localProviders/local?action=login"
+    register: admin_token
+
+  - name: Set new admin password
+    uri:
+     method: POST
+     headers:
+       Authorization: "Bearer {{ admin_token.json.token }}"
+     body_format: json
+     body: {"currentPassword":"admin","newPassword":"admin"}
+     validate_certs: false
+     url: "https://127.0.0.1/v3/users?action=changepassword"
+
+
+
+  - name: Create an API key
+    uri:
+     method: POST
+     status_code: 201
+     headers:
+       Authorization: "Bearer {{ admin_token.json.token }}"
+     body_format: json
+     body: {"type":"token","description":"ansible"}
+     validate_certs: false
+     url: "https://127.0.0.1/v3/token"
+    register: api_key
+
+  - name: Set server URL
+    uri:
+     method: PUT
+     status_code: 200
+     headers:
+       Authorization: "Bearer {{ api_key.json.token }}"
+     body_format: json
+     body: {"name":"server-url","value":"'https://127.0.0.1 }}'"}
+     validate_certs: false
+     url: "https://127.0.0.1/v3/settings/server-url"
+
+  - name: Set OpenLDAP configuration
+    uri:
+     method: PUT
+     status_code: 200
+     headers:
+       Authorization: "Bearer {{ api_key.json.token }}"
+     body_format: json
+     body: "{{ ldap_json }}"
+     validate_certs: false
+     url: "https://127.0.0.1/v3/openLdapConfigs/openldap?action=testAndApply"
+#5################################################################################
+
+#6################################################################################
+  - name: Check OpenLDAP auth
+    uri:
+     method: POST
+     status_code: 201
+     body_format: json
+     body: {"username":"hillel","password":"hillel"}
+     validate_certs: no
+     url: "https://127.0.0.1/v3-public/openLdapProviders/openldap?action=login"
+    register: ldap_result
+
+  - name: Show LDAP request answer
+    debug: 
+     msg='{{ ldap_result }}'
